@@ -21,15 +21,45 @@ def oci_annotations(String reference) {
 }
 
 def oras_pull_json(String reference, String outputDir) {
-  return readJSON(
-    text: run_cmd("oras pull --format json -o '${outputDir}' '${reference}'")
-  )
+  def pullResult = null
+  retry(3) {
+    def pullDir = "${outputDir}.oras-pull-${UUID.randomUUID()}"
+    def quotedPullDir = shell_quote(pullDir)
+    def quotedOutputDir = shell_quote(outputDir)
+    def quotedReference = shell_quote(reference)
+    echo "Pulling OCI artifact '${reference}' via staging dir ${pullDir}"
+    sh "rm -rf ${quotedPullDir} && mkdir -p ${quotedPullDir} ${quotedOutputDir}"
+    def pullDirAbs = run_cmd("readlink -f ${quotedPullDir}")
+    def outputDirAbs = run_cmd("readlink -f ${quotedOutputDir}")
+    try {
+      pullResult = readJSON(
+        text: run_cmd("oras pull --format json -o ${quotedPullDir} ${quotedReference}")
+      )
+      pullResult.files?.each { file ->
+        def stagedPath = file.get('path')?.toString()
+        if (!stagedPath?.startsWith("${pullDirAbs}/")) {
+          error("Unexpected ORAS output path '${stagedPath}' outside staging dir '${pullDirAbs}'")
+        }
+        def relativePath = stagedPath.substring(pullDirAbs.length() + 1)
+        def finalPath = "${outputDirAbs}/${relativePath}"
+        def finalDir = run_cmd("dirname ${shell_quote(finalPath)}")
+        sh "mkdir -p ${shell_quote(finalDir)} && mv -f ${shell_quote(stagedPath)} ${shell_quote(finalPath)}"
+        file.put('path', finalPath)
+      }
+      sh "rm -rf ${quotedPullDir}"
+    } catch (err) {
+      echo "ORAS pull failed for '${reference}', removing partial output from ${pullDir}"
+      sh "rm -rf ${quotedPullDir} || true"
+      throw err
+    }
+  }
+  return pullResult
 }
 
 @NonCPS
 def find_oci_pull_file(Map pullResult, String mediaType) {
-  def file = pullResult.files?.find { it.mediaType == mediaType }
-  return file?.path
+  def file = pullResult.files?.find { it.get('mediaType') == mediaType }
+  return file?.get('path')
 }
 
 @NonCPS
